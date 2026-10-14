@@ -85,7 +85,12 @@
                 </div>
                 <div>
                     <h1 class="text-2xl font-bold tracking-tight text-culinary-900">Maison de Recettes</h1>
-                    <p class="text-xs text-culinary-500 font-medium tracking-wide">YOUR DIGITAL CULINARY JOURNAL</p>
+                    <p class="text-xs text-culinary-500 font-medium tracking-wide flex items-center space-x-1.5">
+                        <span>YOUR DIGITAL CULINARY JOURNAL</span>
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-green-100 text-green-800" id="sync-status">
+                            <i class="fa-solid fa-cloud text-[9px] mr-1"></i> Cloud Synced
+                        </span>
+                    </p>
                 </div>
             </div>
             <div class="flex items-center space-x-3">
@@ -108,9 +113,9 @@
                     <i class="fa-solid fa-bowl-food text-[180px]"></i>
                 </div>
                 <div class="max-w-xl z-10 mb-6 md:mb-0">
-                    <span class="inline-block bg-culinary-200/60 text-culinary-800 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest mb-3">Curated Collection</span>
+                    <span class="inline-block bg-culinary-200/60 text-culinary-800 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest mb-3">Cloud Saved Collection</span>
                     <h2 class="text-3xl sm:text-4xl font-bold text-culinary-900 mb-3 leading-tight">Tasteful moments, beautifully preserved.</h2>
-                    <p class="text-culinary-700 text-sm sm:text-base leading-relaxed">Browse your favorite recipes, scale serving sizes instantly, and organize your favorite meals in one place.</p>
+                    <p class="text-culinary-700 text-sm sm:text-base leading-relaxed">Browse your recipes, scale ingredient servings in real-time, and store your culinary favorites safely in the cloud.</p>
                 </div>
                 <div class="z-10 flex flex-wrap gap-3">
                     <div class="bg-white/90 backdrop-blur border border-culinary-200 px-5 py-3 rounded-2xl shadow-sm text-center">
@@ -124,6 +129,7 @@
                 </div>
             </div>
 
+            <!-- Search and category bar -->
             <div class="flex flex-col md:flex-row gap-4 items-center justify-between">
                 <div class="relative w-full md:w-96">
                     <span class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-culinary-400">
@@ -367,7 +373,7 @@
                 <i class="fa-solid fa-trash"></i>
             </div>
             <h3 class="text-lg font-bold font-serif text-culinary-900">Delete Recipe?</h3>
-            <p class="text-xs text-culinary-600">Are you sure you want to remove this recipe? This action cannot be undone.</p>
+            <p class="text-xs text-culinary-600">Are you sure you want to remove this recipe? This action will remove it from cloud storage.</p>
             <div class="flex items-center justify-center space-x-3 pt-2">
                 <button onclick="app.closeDeleteModal()" class="px-4 py-2 rounded-full text-xs font-semibold text-culinary-700 bg-culinary-100 hover:bg-culinary-200 transition-all">Cancel</button>
                 <button onclick="app.confirmDeleteRecipe()" class="px-4 py-2 rounded-full text-xs font-semibold text-white bg-red-600 hover:bg-red-700 transition-all">Delete</button>
@@ -375,8 +381,26 @@
         </div>
     </div>
 
-    <script>
-        // Default sample recipes
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Setup with environment fallback
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "demo-api-key",
+            authDomain: "demo-app.firebaseapp.com",
+            projectId: "demo-app",
+            storageBucket: "demo-app.appspot.com",
+            messagingSenderId: "123456789",
+            appId: "1:123456789:web:abcdef"
+        };
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'recipe-book-app';
+        const appInstance = initializeApp(firebaseConfig);
+        const auth = getAuth(appInstance);
+        const db = getFirestore(appInstance);
+
         const SAMPLE_RECIPES = [
             {
                 id: "sample-1",
@@ -465,42 +489,114 @@
                 this.searchQuery = '';
                 this.activeRecipeId = null;
                 this.currentServingMultiplier = 1;
-                this.memoryFallback = false;
-                this.init();
+                this.user = null;
+                this.initAuthAndSync();
             }
 
-            init() {
-                this.loadFromStorage();
+            async initAuthAndSync() {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                    this.user = auth.currentUser;
+                    this.setupRealtimeSync();
+                } catch (e) {
+                    console.warn("Cloud auth error, using local fallback state", e);
+                    this.loadLocalFallback();
+                }
+            }
+
+            setupRealtimeSync() {
+                if (!this.user) return;
+                
+                // Firestore collection reference
+                const recipesRef = collection(db, 'artifacts', appId, 'public', 'data', 'recipes');
+                
+                onSnapshot(recipesRef, (snapshot) => {
+                    const cloudRecipes = [];
+                    snapshot.forEach(doc => {
+                        cloudRecipes.push({ id: doc.id, ...doc.data() });
+                    });
+
+                    if (cloudRecipes.length === 0) {
+                        // Seed default samples to cloud on first load
+                        SAMPLE_RECIPES.forEach(recipe => {
+                            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'recipes', recipe.id);
+                            setDoc(docRef, recipe);
+                        });
+                        this.recipes = [...SAMPLE_RECIPES];
+                    } else {
+                        this.recipes = cloudRecipes;
+                    }
+
+                    this.renderCategoryFilters();
+                    this.renderGrid();
+                    this.updateStats();
+
+                    if (this.activeRecipeId) {
+                        const activeExists = this.recipes.some(r => r.id === this.activeRecipeId);
+                        if (!activeExists) {
+                            this.resetView();
+                        } else {
+                            this.viewRecipe(this.activeRecipeId);
+                        }
+                    }
+                }, (error) => {
+                    console.error("Firestore sync error:", error);
+                    this.loadLocalFallback();
+                });
+            }
+
+            loadLocalFallback() {
+                try {
+                    const stored = localStorage.getItem('maison_recipes');
+                    this.recipes = stored ? JSON.parse(stored) : [...SAMPLE_RECIPES];
+                } catch(e) {
+                    this.recipes = [...SAMPLE_RECIPES];
+                }
                 this.renderCategoryFilters();
                 this.renderGrid();
                 this.updateStats();
             }
 
-            loadFromStorage() {
-                try {
-                    const stored = localStorage.getItem('maison_recipes');
-                    if (stored) {
-                        this.recipes = JSON.parse(stored);
-                    } else {
-                        this.recipes = [...SAMPLE_RECIPES];
-                        this.saveToStorage();
-                    }
-                } catch (e) {
-                    console.warn("localStorage unavailable, using in-memory state fallback.", e);
-                    this.memoryFallback = true;
-                    if (!this.recipes || this.recipes.length === 0) {
-                        this.recipes = [...SAMPLE_RECIPES];
+            async persistRecipe(recipeData) {
+                if (this.user) {
+                    try {
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'recipes', recipeData.id);
+                        await setDoc(docRef, recipeData);
+                        return true;
+                    } catch (e) {
+                        console.error("Cloud save failed", e);
                     }
                 }
-            }
-
-            saveToStorage() {
+                // Fallback to local memory/storage
+                const idx = this.recipes.findIndex(r => r.id === recipeData.id);
+                if (idx !== -1) {
+                    this.recipes[idx] = recipeData;
+                } else {
+                    this.recipes.unshift(recipeData);
+                }
                 try {
                     localStorage.setItem('maison_recipes', JSON.stringify(this.recipes));
-                } catch (e) {
-                    console.warn("Could not persist to localStorage, keeping in memory.", e);
-                    this.memoryFallback = true;
+                } catch(e) {}
+                return true;
+            }
+
+            async removeRecipe(recipeId) {
+                if (this.user) {
+                    try {
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'recipes', recipeId);
+                        await deleteDoc(docRef);
+                    } catch (e) {
+                        console.error("Cloud delete failed", e);
+                    }
                 }
+                this.recipes = this.recipes.filter(r => r.id !== recipeId);
+                try {
+                    localStorage.setItem('maison_recipes', JSON.stringify(this.recipes));
+                } catch(e) {}
             }
 
             showToast(message, isError = false) {
@@ -517,49 +613,6 @@
                 setTimeout(() => {
                     toast.classList.add('translate-y-20', 'opacity-0');
                 }, 3500);
-            }
-
-            init() {
-                this.loadFromStorage();
-                this.renderCategoryFilters();
-                this.renderGrid();
-                this.updateStats();
-            }
-
-            loadFromStorage() {
-                try {
-                    const stored = localStorage.getItem('maison_recipes');
-                    if (stored) {
-                        this.recipes = JSON.parse(stored);
-                    } else {
-                        this.recipes = SAMPLE_RECIPES;
-                        this.saveToStorage();
-                    }
-                } catch (e) {
-                    this.recipes = SAMPLE_RECIPES;
-                }
-            }
-
-            saveToStorage() {
-                try {
-                    localStorage.setItem('maison_recipes', JSON.stringify(this.recipes));
-                } catch (e) {
-                    // Fallback for restricted sandboxed contexts
-                }
-            }
-
-            showToast(message, isError = false) {
-                const toast = document.getElementById('toast');
-                const msg = document.getElementById('toast-message');
-                const icon = document.getElementById('toast-icon');
-                
-                msg.textContent = message;
-                icon.className = isError ? "fa-solid fa-circle-exclamation text-red-400" : "fa-solid fa-circle-check text-green-400";
-                
-                toast.classList.remove('translate-y-20', 'opacity-0');
-                setTimeout(() => {
-                    toast.classList.add('translate-y-20', 'opacity-0');
-                }, 3000);
             }
 
             updateStats() {
@@ -831,7 +884,7 @@
                 container.appendChild(div);
             }
 
-            saveRecipe(event) {
+            async saveRecipe(event) {
                 if (event) {
                     event.preventDefault();
                 }
@@ -884,20 +937,9 @@
                         notes
                     };
 
-                    if (idInput) {
-                        const index = this.recipes.findIndex(r => r.id === idInput);
-                        if (index !== -1) {
-                            this.recipes[index] = recipeData;
-                        } else {
-                            this.recipes.unshift(recipeData);
-                        }
-                        this.showToast('Recipe updated successfully!');
-                    } else {
-                        this.recipes.unshift(recipeData);
-                        this.showToast('Recipe added successfully!');
-                    }
+                    await this.persistRecipe(recipeData);
 
-                    this.saveToStorage();
+                    this.showToast(idInput ? 'Recipe updated in cloud!' : 'Recipe saved to cloud database!');
                     this.closeAddModal();
                     this.renderCategoryFilters();
                     this.renderGrid();
@@ -927,20 +969,18 @@
                 document.getElementById('delete-modal').classList.add('hidden');
             }
 
-            confirmDeleteRecipe() {
-                this.recipes = this.recipes.filter(r => r.id !== this.activeRecipeId);
-                this.saveToStorage();
-                this.closeDeleteModal();
-                this.showToast('Recipe deleted.');
-                this.resetView();
+            async confirmDeleteRecipe() {
+                if (this.activeRecipeId) {
+                    await this.removeRecipe(this.activeRecipeId);
+                    this.closeDeleteModal();
+                    this.showToast('Recipe deleted from cloud.');
+                    this.resetView();
+                }
             }
         }
 
-        // Initialize application on page load
-        let app;
-        window.addEventListener('DOMContentLoaded', () => {
-            app = new RecipeBookApp();
-        });
+        // Expose app globally for inline HTML click handlers
+        window.app = new RecipeBookApp();
     </script>
 </body>
 </html>
